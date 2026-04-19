@@ -10,7 +10,7 @@ import (
 )
 
 const appName = "InfVerif (Go)"
-const appVersion = "0.2.0"
+const appVersion = "0.3.0"
 
 func main() {
 	args := os.Args[1:]
@@ -18,6 +18,9 @@ func main() {
 	opts := verifier.Options{}
 	var files []string
 	var showHelp bool
+	var errorCodeHelp int
+	var showHDCRules bool
+	var showExceptions bool
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -41,6 +44,8 @@ func main() {
 			opts.Mode = verifier.ModeWindows
 		case "k":
 			opts.Mode = verifier.ModeSubmission
+		case "h":
+			opts.Mode = verifier.ModeSignatureRequirements
 		case "msft":
 			opts.Mode = verifier.ModeMSFT
 			opts.MSFT = true
@@ -50,6 +55,8 @@ func main() {
 			opts.Mode = verifier.ModeDepends
 		case "api":
 			opts.Mode = verifier.ModeAPI
+		case "syntax":
+			opts.Mode = verifier.ModeSyntax
 		case "stampinf":
 			opts.StampInf = true
 		case "msbuild":
@@ -66,6 +73,48 @@ func main() {
 			opts.Recurse = true
 		case "debug":
 			opts.Debug = true
+		case "noexceptions":
+			opts.NoExceptions = true
+		case "attestation":
+			opts.Attestation = true
+		case "logging":
+			opts.Logging = true
+		case "verboseparams":
+			opts.VerboseParams = true
+		case "samples":
+			opts.Samples = true
+		case "wdk":
+			opts.WDK = true
+		case "hdcrules":
+			showHDCRules = true
+		case "showexceptions":
+			showExceptions = true
+		case "code":
+			i++
+			if i < len(args) {
+				fmt.Sscanf(args[i], "%d", &errorCodeHelp)
+			}
+		case "rulever":
+			i++
+			if i < len(args) {
+				rv, ok := verifier.ParseRuleVersion(args[i])
+				if ok {
+					opts.RuleVer = &rv
+				} else {
+					fmt.Fprintf(os.Stderr, "Invalid /rulever value: %s\n", args[i])
+					os.Exit(87)
+				}
+			}
+		case "provider":
+			i++
+			if i < len(args) {
+				opts.Provider = args[i]
+			}
+		case "dll":
+			i++
+			if i < len(args) {
+				opts.DLLPath = args[i]
+			}
 		case "errorlist":
 			i++
 			if i < len(args) {
@@ -120,11 +169,46 @@ func main() {
 	}
 
 	if showHelp || len(files) == 0 {
+		// Handle immediate-exit commands first (don't need files)
+		if showHDCRules {
+			verifier.PrintHDCRules()
+			os.Exit(0)
+		}
+		if showExceptions {
+			verifier.PrintExceptions()
+			os.Exit(0)
+		}
+		if errorCodeHelp > 0 {
+			verifier.PrintErrorCodeHelp(errorCodeHelp)
+			os.Exit(0)
+		}
+
 		printUsage()
 		if len(files) == 0 && !showHelp {
 			os.Exit(87)
 		}
 		os.Exit(0)
+	}
+
+	// Handle immediate-exit commands (even with files specified)
+	if showHDCRules {
+		verifier.PrintHDCRules()
+		os.Exit(0)
+	}
+	if showExceptions {
+		verifier.PrintExceptions()
+		os.Exit(0)
+	}
+	if errorCodeHelp > 0 {
+		verifier.PrintErrorCodeHelp(errorCodeHelp)
+		os.Exit(0)
+	}
+
+	// Parameter validation: /noexceptions requires /h
+	if opts.NoExceptions && opts.Mode != verifier.ModeSignatureRequirements {
+		fmt.Fprintln(os.Stderr, "Error: /noexceptions requires /h mode.")
+		printUsage()
+		os.Exit(87)
 	}
 
 	// Expand wildcards and recurse
@@ -220,6 +304,15 @@ func main() {
 				printDepends(file, depInfo)
 			}
 
+		case verifier.ModeSyntax:
+			entries, err := verifier.CollectSyntax(file)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing '%s': %v\n", file, err)
+				exitCode = 1
+			} else {
+				printSyntax(file, entries)
+			}
+
 		default:
 			// Validation mode
 			result := verifier.Verify(file, opts)
@@ -254,6 +347,16 @@ func main() {
 func printVerboseModeInfo(opts verifier.Options) {
 	fmt.Println("Running in Verbose")
 	flags := verifier.ModeFlags(opts.Mode)
+	// /h mode
+	if opts.Mode == verifier.ModeSignatureRequirements {
+		fmt.Println("Running signature requirements check")
+		rv := verifier.GetEffectiveRuleVersion(opts)
+		fmt.Printf("Using rules from OS build: %s\n", rv.String())
+	}
+	// DLL info
+	if opts.DLLPath != "" {
+		fmt.Printf("Using validation DLL: %s\n", opts.DLLPath)
+	}
 	// Print checks in reverse order (most specific first) matching original behavior
 	if flags&0x04 != 0 {
 		fmt.Println("Running state separation check")
@@ -266,9 +369,39 @@ func printVerboseModeInfo(opts verifier.Options) {
 	}
 	switch opts.Mode {
 	case verifier.ModeSubmission:
-		fmt.Println("Running Windows Update submission check")
+		fmt.Println("Running Declarative Driver requirements check")
 	case verifier.ModeMSFT:
-		fmt.Println("Running Microsoft internal check")
+		fmt.Println("Running in MSFT driver mode")
+	}
+	// /verboseparams
+	if opts.VerboseParams {
+		allFlags := verifier.ModeFlags(opts.Mode)
+		// Add other option flags
+		if opts.Inbox {
+			allFlags |= 0x10
+		}
+		if opts.MSFT {
+			allFlags |= 0x20
+		}
+		if opts.NoExceptions {
+			allFlags |= 0x800
+		}
+		if opts.Attestation {
+			allFlags |= 0x8000
+		}
+		if opts.Recurse {
+			allFlags |= 0x100
+		}
+		if opts.LevelSort {
+			allFlags |= 0x2000
+		}
+		if opts.WError {
+			allFlags |= 0x800000
+		}
+		if opts.ErrorListFile != "" {
+			allFlags |= 0x1000000
+		}
+		fmt.Printf("InfVerif Flags: 0x%08X\n", allFlags)
 	}
 }
 
@@ -340,15 +473,17 @@ func printInfo(file string, result verifier.Result) {
 
 func printUsage() {
 	fmt.Printf("\n%s\nVersion %s\n\n", appName, appVersion)
-	fmt.Println("USAGE: infverif [/v] [[/c] | [/u] | [/w] | [/k]] [/wbuild <Major.Minor.Build>]")
-	fmt.Println("                [/info] [/depends] [/stampinf] [/l <path>]")
-	fmt.Println("                [/osver <TargetOSVersion>] [/product <ias file>]")
-	fmt.Println("                [/csv <file>] [/errorlist <file>] [/errorlevel <n>]")
-	fmt.Println("                [/werror] [/exclude <file>] [/levelsort] [/msbuild]")
-	fmt.Println("                [/inbox] [/append] [/fileroot <path>] [/recurse] <files>")
+	fmt.Println("USAGE: infverif [/code <error code>] [/v] [[/h] | [/w] | [/u] | [/k]]")
+	fmt.Println("                [/rulever <Major.Minor.Build> | vnext]")
+	fmt.Println("                [/wbuild <Major.Minor.Build>] [/info] [/stampinf]")
+	fmt.Println("                [/l <path>] [/osver <TargetOSVersion>] [/product <ias file>]")
+	fmt.Println("                [/provider <ProviderName>] <files>")
 	fmt.Println()
 	fmt.Println("/v")
 	fmt.Println("\tDisplay verbose file logging details.")
+	fmt.Println()
+	fmt.Println("/h")
+	fmt.Println("\tReports errors using WHQL signature requirements. (mode)")
 	fmt.Println()
 	fmt.Println("/c")
 	fmt.Println("\tReports errors for Configurability requirements. (mode)")
@@ -360,7 +495,14 @@ func printUsage() {
 	fmt.Println("\tReports errors for Windows Driver requirements. (mode)")
 	fmt.Println()
 	fmt.Println("/k")
-	fmt.Println("\tReports errors for Windows Update submission. (mode)")
+	fmt.Println("\tReports errors using Declarative Driver requirements. (mode)")
+	fmt.Println()
+	fmt.Println("/code <error code>")
+	fmt.Println("\tDisplays help for the specified InfVerif error code.")
+	fmt.Println()
+	fmt.Println("/rulever <Major.Minor.Build> | vnext")
+	fmt.Println("\tSpecify the rule version for /h mode. Default is current InfVerif version.")
+	fmt.Println("\tNamed versions: vnext, 24h2, 25h2, 26h2, 27h2")
 	fmt.Println()
 	fmt.Println("/wbuild <Major.Minor.Build>")
 	fmt.Println("\tFor Windows Drivers with downlevel support, specifies")
@@ -369,9 +511,6 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("/info")
 	fmt.Println("\tDisplays INF summary information.")
-	fmt.Println()
-	fmt.Println("/depends")
-	fmt.Println("\tDisplays INF Include/Needs dependency information.")
 	fmt.Println()
 	fmt.Println("/stampinf")
 	fmt.Println("\tTreat $ARCH$ as a valid architecture, to validate")
@@ -388,46 +527,16 @@ func printUsage() {
 	fmt.Println("/product <ias file>")
 	fmt.Println("\tValidate Include/Needs against a product definition .ias file.")
 	fmt.Println()
-	fmt.Println("/csv <file>")
-	fmt.Println("\tOutput validation results to a CSV file.")
-	fmt.Println()
-	fmt.Println("/errorlist <file>")
-	fmt.Println("\tSpecify a CSV file of error codes to suppress.")
-	fmt.Println("\tError codes 1310-1319 cannot be suppressed.")
-	fmt.Println()
-	fmt.Println("/errorlevel <n>")
-	fmt.Println("\tOnly report issues at or below level n (1=ERROR, 2=WARNING, 3=INFO).")
-	fmt.Println()
-	fmt.Println("/werror")
-	fmt.Println("\tTreat warnings as errors.")
-	fmt.Println()
-	fmt.Println("/exclude <file>")
-	fmt.Println("\tExclude files listed in the specified file from validation.")
-	fmt.Println()
-	fmt.Println("/levelsort")
-	fmt.Println("\tSort output by error level.")
-	fmt.Println()
-	fmt.Println("/msbuild")
-	fmt.Println("\tOutput errors in MSBuild-compatible format.")
-	fmt.Println()
-	fmt.Println("/inbox")
-	fmt.Println("\tInbox driver validation mode.")
-	fmt.Println()
-	fmt.Println("/append")
-	fmt.Println("\tAppend to CSV file instead of overwriting.")
-	fmt.Println()
-	fmt.Println("/fileroot <path>")
-	fmt.Println("\tFile root directory for environment variable resolution.")
-	fmt.Println()
-	fmt.Println("/recurse")
-	fmt.Println("\tRecursively search subdirectories for INF files.")
+	fmt.Println("/provider <ProviderName>")
+	fmt.Println("\tReports an error for INFs not using the specified provider name.")
 	fmt.Println()
 	fmt.Println("<files>")
 	fmt.Println("\tA space-separated list of INF files to analyze.")
 	fmt.Println("\tAll files must have .inf extension.")
 	fmt.Println("\tWildcards (*) may be used.")
 	fmt.Println()
-	fmt.Println("Only one mode option (/c, /u, /w, /k, /info, /depends) may be passed at a time.")
+	fmt.Println("Only one mode option (/h, /c, /u, /w, /k, /info, /depends, /syntax)")
+	fmt.Println("may be passed at a time.")
 }
 
 func printDepends(file string, depInfo *verifier.DependencyInfo) {
@@ -453,6 +562,25 @@ func printDepends(file string, depInfo *verifier.DependencyInfo) {
 				fmt.Printf("    [%s]\n", need)
 			}
 		}
+	}
+}
+
+func printSyntax(file string, entries []verifier.SyntaxEntry) {
+	fmt.Println("\nINF Syntax Report")
+	fmt.Println()
+
+	if len(entries) == 0 {
+		fmt.Println("No syntax found")
+		return
+	}
+
+	fmt.Printf("%-35s %s\n", "Syntax", "Minimum Supported OS")
+	for _, e := range entries {
+		name := e.Name
+		if len(name) > 35 {
+			name = name[:35]
+		}
+		fmt.Printf("%-35s (%s)\n", name, e.MinVersion.String())
 	}
 }
 

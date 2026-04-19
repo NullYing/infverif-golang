@@ -38,15 +38,17 @@ func (l ErrorLevel) String() string {
 type ValidationMode int
 
 const (
-	ModeDefault      ValidationMode = 0
-	ModeConfigurable ValidationMode = 1  // /c  - flag 0x01
-	ModeUniversal    ValidationMode = 2  // /u  - flag 0x03
-	ModeWindows      ValidationMode = 3  // /w  - flag 0x07
-	ModeSubmission   ValidationMode = 4  // /k  - flag 0x43
-	ModeMSFT         ValidationMode = 5  // /msft - flag 0x23
-	ModeInfo         ValidationMode = 10 // /info
-	ModeDepends      ValidationMode = 11 // /depends
-	ModeAPI          ValidationMode = 12 // /api
+	ModeDefault              ValidationMode = 0
+	ModeConfigurable         ValidationMode = 1  // /c  - flag 0x01
+	ModeUniversal            ValidationMode = 2  // /u  - flag 0x03
+	ModeWindows              ValidationMode = 3  // /w  - flag 0x07
+	ModeSubmission           ValidationMode = 4  // /k  - flag 0x43
+	ModeMSFT                 ValidationMode = 5  // /msft - flag 0x23
+	ModeSignatureRequirements ValidationMode = 6  // /h  - flag 0x80
+	ModeInfo                 ValidationMode = 10 // /info
+	ModeDepends              ValidationMode = 11 // /depends
+	ModeAPI                  ValidationMode = 12 // /api
+	ModeSyntax               ValidationMode = 13 // /syntax
 )
 
 // ModeFlags returns the internal bit flags for a validation mode,
@@ -63,6 +65,8 @@ func ModeFlags(m ValidationMode) uint32 {
 		return 0x43
 	case ModeMSFT:
 		return 0x23
+	case ModeSignatureRequirements:
+		return 0x80
 	default:
 		return 0x00
 	}
@@ -131,6 +135,17 @@ type Options struct {
 	ProductFile   string // product definition .ias file
 	MSFT          bool   // Microsoft internal mode
 	Debug         bool   // wait for debugger
+
+	// New version features
+	NoExceptions  bool        // /noexceptions - disable exception exemptions
+	Attestation   bool        // /attestation - attestation signing validation
+	Logging       bool        // /logging - debug OS version logging
+	VerboseParams bool        // /verboseparams - show internal flags
+	RuleVer       *RuleVersion // /rulever - rule version for /h mode
+	Provider      string      // /provider - required provider name
+	DLLPath       string      // /dll - external validation DLL path
+	Samples       bool        // /samples - load sample rule presets
+	WDK           bool        // /wdk - load WDK rule presets
 }
 
 // NonSuppressibleError returns true if an error code is in the 1310-1319 range
@@ -186,6 +201,20 @@ func Verify(path string, opts Options) Result {
 	}
 	if HasStateSeparationCheck(opts.Mode) {
 		checkWindowsDriverRequirements(inf, path, &result)
+	}
+
+	// /h mode: signature requirements check
+	if opts.Mode == ModeSignatureRequirements {
+		rv := DefaultRuleVersion
+		if opts.RuleVer != nil {
+			rv = *opts.RuleVer
+		}
+		checkSignatureRequirements(inf, path, &result, rv, opts.NoExceptions)
+	}
+
+	// /provider check
+	if opts.Provider != "" {
+		checkProvider(inf, path, &result, opts.Provider, resolve)
 	}
 
 	// Build info
@@ -1276,4 +1305,247 @@ func FormatCSVRow(file string, issue Issue) string {
 // CSVHeader returns the CSV header line.
 func CSVHeader() string {
 	return "Filename,Level,Code,Line,Message"
+}
+
+// checkSignatureRequirements performs /h mode validation.
+// Checks registry and file destination paths against the exception database.
+func checkSignatureRequirements(inf *infparser.INFFile, path string, result *Result, rv RuleVersion, noExceptions bool) {
+	// Check registry operations
+	for _, secName := range inf.Order {
+		sec := inf.Sections[secName]
+		for _, entry := range sec.Entries {
+			if strings.EqualFold(entry.Key, "AddReg") || strings.EqualFold(entry.Key, "DelReg") {
+				for _, regSection := range entry.Values {
+					checkRegSignatureRequirements(inf, regSection, path, result, rv, noExceptions)
+				}
+			}
+		}
+	}
+
+	// Check file destination dirs
+	destDirs := inf.GetSection("destinationdirs")
+	if destDirs != nil {
+		for _, entry := range destDirs.Entries {
+			if strings.EqualFold(entry.Key, "DefaultDestDir") {
+				continue
+			}
+			if len(entry.Values) > 0 {
+				dirid := strings.TrimSpace(entry.Values[0])
+				subpath := ""
+				if len(entry.Values) > 1 {
+					subpath = strings.TrimSpace(entry.Values[1])
+				}
+				// DIRID 13 is always allowed
+				if dirid == "13" {
+					continue
+				}
+				if !IsFilePathExempt(dirid, subpath, rv, noExceptions) {
+					result.Issues = append(result.Issues, Issue{
+						Level:   LevelError,
+						Code:    2120,
+						Line:    entry.Line,
+						File:    path,
+						Message: fmt.Sprintf("Destination directory DIRID %s is not allowed for signature requirements. Use DIRID 13 or an approved exception path.", dirid),
+					})
+				}
+			}
+		}
+	}
+
+	// Check PnpLockdown
+	pnpLockdown := inf.GetValue("version", "PnpLockdown")
+	if pnpLockdown != "1" {
+		result.Issues = append(result.Issues, Issue{
+			Level:   LevelWarning,
+			Code:    2150,
+			File:    path,
+			Message: "[Version] section should specify PnpLockdown=1.",
+		})
+	}
+}
+
+func checkRegSignatureRequirements(inf *infparser.INFFile, sectionName, path string, result *Result, rv RuleVersion, noExceptions bool) {
+	sec := inf.GetSection(sectionName)
+	if sec == nil {
+		return
+	}
+
+	for _, entry := range sec.Entries {
+		if len(entry.Values) == 0 {
+			continue
+		}
+		root := strings.TrimSpace(entry.Values[0])
+		if root == "" || strings.EqualFold(root, "HKR") {
+			continue
+		}
+		subkey := ""
+		if len(entry.Values) > 1 {
+			subkey = strings.TrimSpace(entry.Values[1])
+		}
+		if !IsRegistryPathExempt(root, subkey, rv, noExceptions) {
+			result.Issues = append(result.Issues, Issue{
+				Level:   LevelError,
+				Code:    2100,
+				Line:    entry.Line,
+				File:    path,
+				Message: fmt.Sprintf("Registry path '%s\\%s' is not allowed for signature requirements. Use HKR or an approved exception path.", root, subkey),
+			})
+		}
+	}
+}
+
+// checkProvider validates the Provider value matches /provider switch.
+func checkProvider(inf *infparser.INFFile, path string, result *Result, requiredProvider string, resolve func(string) string) {
+	provider := resolve(inf.GetValue("version", "Provider"))
+	if !strings.EqualFold(provider, requiredProvider) {
+		providerEntry := inf.GetEntry("version", "Provider")
+		line := 0
+		if len(providerEntry) > 0 {
+			line = providerEntry[0].Line
+		}
+		result.Issues = append(result.Issues, Issue{
+			Level:   LevelError,
+			Code:    1302,
+			Line:    line,
+			File:    path,
+			Message: "Provider name must match the /provider switch.",
+		})
+	}
+}
+
+// CollectSyntax scans an INF file and returns the syntax features found.
+func CollectSyntax(path string) ([]SyntaxEntry, error) {
+	inf, err := infparser.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+
+	found := make(map[string]bool)
+	var entries []SyntaxEntry
+
+	// Scan for known directives
+	for _, secName := range inf.Order {
+		sec := inf.Sections[secName]
+		for _, entry := range sec.Entries {
+			keyLower := strings.ToLower(entry.Key)
+			directiveMap := map[string]string{
+				"addservice":        "AddService",
+				"addreg":            "AddReg",
+				"copyfiles":         "CopyFiles",
+				"delreg":            "DelReg",
+				"include":           "Include",
+				"needs":             "Needs",
+				"addfilter":         "AddFilter",
+				"addeventprovider":  "AddEventProvider",
+				"addsoftwaredevice": "AddSoftwareDevice",
+				"addinterface":      "AddInterface",
+			}
+			if name, ok := directiveMap[keyLower]; ok {
+				if !found[name] {
+					found[name] = true
+					if rv, ok := knownSyntaxFeatures[name]; ok {
+						entries = append(entries, SyntaxEntry{Name: name, MinVersion: rv})
+					}
+				}
+			}
+		}
+	}
+
+	// Check PnpLockdown
+	if inf.GetValue("version", "PnpLockdown") != "" && !found["PnpLockdown"] {
+		found["PnpLockdown"] = true
+		if rv, ok := knownSyntaxFeatures["PnpLockdown"]; ok {
+			entries = append(entries, SyntaxEntry{Name: "PnpLockdown", MinVersion: rv})
+		}
+	}
+
+	// Check SourceDisksFiles / SourceDisksNames
+	if inf.GetSection("sourcedisksfiles") != nil && !found["SourceDisksFiles"] {
+		found["SourceDisksFiles"] = true
+		if rv, ok := knownSyntaxFeatures["SourceDisksFiles"]; ok {
+			entries = append(entries, SyntaxEntry{Name: "SourceDisksFiles", MinVersion: rv})
+		}
+	}
+	if inf.GetSection("sourcedisksnames") != nil && !found["SourceDisksNames"] {
+		found["SourceDisksNames"] = true
+		if rv, ok := knownSyntaxFeatures["SourceDisksNames"]; ok {
+			entries = append(entries, SyntaxEntry{Name: "SourceDisksNames", MinVersion: rv})
+		}
+	}
+
+	return entries, nil
+}
+
+// GetEffectiveRuleVersion returns the rule version to use.
+func GetEffectiveRuleVersion(opts Options) RuleVersion {
+	if opts.RuleVer != nil {
+		return *opts.RuleVer
+	}
+	return DefaultRuleVersion
+}
+
+// PrintExceptions outputs the exception database in CSV format.
+func PrintExceptions() {
+	fmt.Println("Release,Source,Type,Path")
+	for _, exc := range FileExceptions {
+		dirName := exc.Root
+		if name, ok := diridNames[exc.Root]; ok {
+			dirName = name
+		}
+		path := dirName
+		if exc.Path != "" {
+			path = dirName + `\` + exc.Path
+		}
+		release := "0.0.0"
+		if exc.RemoveVersion != "" {
+			release = exc.RemoveVersion
+		}
+		fmt.Printf("%s,Static,File,%s\n", release, path)
+	}
+	for _, exc := range RegistryExceptions {
+		path := exc.Root
+		if exc.Path != "" {
+			path = exc.Root + `\` + exc.Path
+		}
+		release := "0.0.0"
+		if exc.RemoveVersion != "" {
+			release = exc.RemoveVersion
+		}
+		fmt.Printf("%s,Static,Registry,%s\n", release, path)
+	}
+}
+
+// PrintHDCRules outputs the HDC error code rules.
+func PrintHDCRules() {
+	fmt.Println("HDC Error Code Rules")
+	fmt.Println()
+	fmt.Println("All Submissions:")
+	fmt.Println("=====================")
+	for _, e := range errorDatabase {
+		if e.Flags&HDCFlagAllSubmissions != 0 {
+			fmt.Printf("(%d) %s\n", e.Code, e.Description)
+		}
+	}
+	fmt.Println()
+	fmt.Println("Downlevel Declarative:")
+	fmt.Println("=====================")
+	for _, e := range errorDatabase {
+		if e.Flags&HDCFlagDownlevelDeclarative != 0 && e.Flags&HDCFlagAllSubmissions == 0 {
+			fmt.Printf("(%d) %s\n", e.Code, e.Description)
+		}
+	}
+}
+
+// PrintErrorCodeHelp prints help for a specific error code.
+func PrintErrorCodeHelp(code int) {
+	entry := FindError(code)
+	if entry == nil {
+		fmt.Println("Error code invalid")
+		return
+	}
+	fmt.Printf("InfVerif Error Code %d Help\n", code)
+	fmt.Println()
+	fmt.Println(entry.Description)
+	fmt.Println()
+	fmt.Printf("Error code documentation is available at https://aka.ms/infverif#%d\n", code)
 }
