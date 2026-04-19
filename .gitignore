@@ -1,0 +1,4 @@
+*.inf
+docs
+infverif.exe
+*.csv
