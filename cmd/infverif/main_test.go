@@ -576,3 +576,561 @@ func TestCLI_InvalidRuleVer(t *testing.T) {
 		t.Errorf("Exit code = %d, want 87 for invalid /rulever", code)
 	}
 }
+
+// === Tests for remaining public parameters ===
+
+// TestCLI_ConfigurableMode: /c → configurability check only
+func TestCLI_ConfigurableMode(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/c", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_VerboseConfigurable: /v /c → only configurability check, no include/needs
+func TestCLI_VerboseConfigurable(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, _ := runBinary(t, bin, "/v", "/c", inf)
+
+	if !strings.Contains(out, "Running configurability check") {
+		t.Errorf("Output missing 'Running configurability check':\n%s", out)
+	}
+	// /c should NOT run include/needs or state separation
+	if strings.Contains(out, "Running include/needs check") {
+		t.Errorf("Output should NOT contain 'Running include/needs check' for /c:\n%s", out)
+	}
+	if strings.Contains(out, "Running state separation check") {
+		t.Errorf("Output should NOT contain 'Running state separation check' for /c:\n%s", out)
+	}
+}
+
+// TestCLI_DeclarativeMode: /k → declarative driver check
+func TestCLI_DeclarativeMode(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/k", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_VerboseDeclarative: /v /k → includes Declarative Driver requirements
+func TestCLI_VerboseDeclarative(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, _ := runBinary(t, bin, "/v", "/k", inf)
+
+	expected := []string{
+		"Running in Verbose",
+		"Running include/needs check",
+		"Running configurability check",
+		"Running Declarative Driver requirements check",
+	}
+	for _, s := range expected {
+		if !strings.Contains(out, s) {
+			t.Errorf("Output missing %q:\n%s", s, out)
+		}
+	}
+	// /k should NOT include state separation check
+	if strings.Contains(out, "Running state separation check") {
+		t.Errorf("Output should NOT contain 'Running state separation check' for /k:\n%s", out)
+	}
+}
+
+// TestCLI_WBuild: /w /wbuild → passes with valid build version
+func TestCLI_WBuild(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/w", "/wbuild", "10.0.19041", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_StampInf: /stampinf → accepts $ARCH$ as valid
+func TestCLI_StampInf(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	// /stampinf should not cause errors on a valid INF
+	out, code := runBinary(t, bin, "/stampinf", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_LogOutput: /l <path> → creates HTML log directory output
+func TestCLI_LogOutput(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+	logDir := filepath.Join(dir, "logs")
+	os.MkdirAll(logDir, 0755)
+
+	out, code := runBinary(t, bin, "/l", logDir, inf)
+	// /l should still validate and report result
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_OsVer: /osver → only processes specified target OS
+func TestCLI_OsVer(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/osver", "NTAMD64.10.0", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_Product: /product → validates with product definition (non-existent file → still runs)
+func TestCLI_Product(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+	iasFile := writeUTF8File(t, dir, "product.ias", "")
+
+	// /product with empty .ias should not crash, INF should still be valid
+	out, code := runBinary(t, bin, "/product", iasFile, inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+}
+
+// === Additional edge-case tests for already-covered public parameters ===
+
+// TestCLI_HelpFlag: /help (long form) → same as /?
+func TestCLI_HelpLongForm(t *testing.T) {
+	bin := buildBinary(t)
+	out, code := runBinary(t, bin, "/help")
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 for /help", code)
+	}
+	if !strings.Contains(out, "USAGE:") {
+		t.Errorf("Help output should contain 'USAGE:':\n%s", out)
+	}
+}
+
+// TestCLI_HelpWithDash: -? → same as /?
+func TestCLI_HelpWithDash(t *testing.T) {
+	bin := buildBinary(t)
+	out, code := runBinary(t, bin, "-?")
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 for -?", code)
+	}
+	if !strings.Contains(out, "USAGE:") {
+		t.Errorf("Help output should contain 'USAGE:':\n%s", out)
+	}
+}
+
+// TestCLI_CodeInvalid: /code with non-existent error code
+func TestCLI_CodeInvalid(t *testing.T) {
+	bin := buildBinary(t)
+	out, code := runBinary(t, bin, "/code", "9999")
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "invalid") {
+		t.Errorf("Output should contain 'invalid' for unknown error code:\n%s", out)
+	}
+}
+
+// TestCLI_CodeMultiple: /code for various known codes
+func TestCLI_CodeMultiple(t *testing.T) {
+	bin := buildBinary(t)
+
+	codes := []struct {
+		code string
+		desc string
+	}{
+		{"1200", "Version"},
+		{"1220", "GUID"},
+		{"1284", "Reserved"},
+		{"1302", "Provider"},
+		{"2100", "Registry"},
+		{"2150", "PnpLockdown"},
+	}
+
+	for _, tc := range codes {
+		t.Run("code_"+tc.code, func(t *testing.T) {
+			out, code := runBinary(t, bin, "/code", tc.code)
+			if code != 0 {
+				t.Errorf("Exit code = %d, want 0", code)
+			}
+			if !strings.Contains(out, tc.code) {
+				t.Errorf("Output should contain code %s:\n%s", tc.code, out)
+			}
+			if !strings.Contains(out, tc.desc) {
+				t.Errorf("Output should contain %q:\n%s", tc.desc, out)
+			}
+		})
+	}
+}
+
+// TestCLI_RuleVerNamedVersions: /h /rulever with all named versions
+func TestCLI_RuleVerNamedVersions(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	versions := []struct {
+		name    string
+		buildNo string
+	}{
+		{"vnext", "10.0.99999"},
+		{"vnext_2", "10.0.99998"},
+		{"24h2", "10.0.26100"},
+		{"25h2", "10.0.26200"},
+		{"26h2", "10.0.26300"},
+		{"27h2", "10.0.26400"},
+	}
+
+	for _, v := range versions {
+		t.Run(v.name, func(t *testing.T) {
+			out, _ := runBinary(t, bin, "/v", "/h", "/rulever", v.name, inf)
+			if !strings.Contains(out, v.buildNo) {
+				t.Errorf("Output should contain version %s for /rulever %s:\n%s", v.buildNo, v.name, out)
+			}
+		})
+	}
+}
+
+// TestCLI_RuleVerNumeric: /h /rulever with numeric version
+func TestCLI_RuleVerNumeric(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, _ := runBinary(t, bin, "/v", "/h", "/rulever", "10.0.17763", inf)
+	if !strings.Contains(out, "10.0.17763") {
+		t.Errorf("Output should contain version 10.0.17763:\n%s", out)
+	}
+}
+
+// TestCLI_HMode_ExitCode: /h with valid INF → exit 0
+func TestCLI_HMode_ExitCode(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/h", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should contain 'INF is VALID':\n%s", out)
+	}
+}
+
+// TestCLI_HMode_ReservedClass: /h with reserved class → exit 1
+func TestCLI_HMode_ReservedClass(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+
+	out, code := runBinary(t, bin, "/h", inf)
+	if code != 1 {
+		t.Errorf("Exit code = %d, want 1\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is NOT VALID") {
+		t.Errorf("Output should contain 'INF is NOT VALID':\n%s", out)
+	}
+}
+
+// TestCLI_NoExceptionsWithH: /h /noexceptions → valid combination
+func TestCLI_NoExceptionsWithH(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/h", "/noexceptions", inf)
+	// Should not exit 87 (valid parameter combination)
+	if code == 87 {
+		t.Errorf("Exit code = 87, /h /noexceptions should be valid combination\nOutput: %s", out)
+	}
+}
+
+// TestCLI_ProviderCaseInsensitive: /provider comparison is case-insensitive (uses EqualFold)
+func TestCLI_ProviderCaseInsensitive(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	// Exact match should pass
+	out, code := runBinary(t, bin, "/provider", "TestManufacturer", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 for exact match\nOutput: %s", code, out)
+	}
+
+	// Case-insensitive match should also pass
+	out, code = runBinary(t, bin, "/provider", "testmanufacturer", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 for case-insensitive match\nOutput: %s", code, out)
+	}
+
+	// Completely wrong name should fail
+	out, code = runBinary(t, bin, "/provider", "WrongProvider", inf)
+	if code != 1 {
+		t.Errorf("Exit code = %d, want 1 for wrong provider\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "1302") {
+		t.Errorf("Wrong provider should trigger error 1302:\n%s", out)
+	}
+}
+
+// TestCLI_InfoReservedClass: /info with reserved class → still shows info, no validation errors
+func TestCLI_InfoReservedClass(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+
+	out, code := runBinary(t, bin, "/info", inf)
+	// /info mode shows info, no validation
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 for /info mode\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "Information") {
+		t.Errorf("Output should contain 'Information':\n%s", out)
+	}
+	if !strings.Contains(out, "Root\\TestDevice") {
+		t.Errorf("Output should contain hardware ID:\n%s", out)
+	}
+}
+
+// TestCLI_VerboseDefault: /v without mode → verbose default validation
+func TestCLI_VerboseDefault(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "/v", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "Running in Verbose") {
+		t.Errorf("Output should contain 'Running in Verbose':\n%s", out)
+	}
+	if !strings.Contains(out, "Validating") {
+		t.Errorf("Verbose output should contain 'Validating':\n%s", out)
+	}
+}
+
+// TestCLI_CSVAppend: /csv /append → appends to existing CSV file
+func TestCLI_CSVAppend(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+	csvPath := filepath.Join(dir, "output.csv")
+
+	// First run creates the file
+	runBinary(t, bin, "/csv", csvPath, inf)
+	data1, _ := os.ReadFile(csvPath)
+
+	// Second run with /append adds more lines
+	runBinary(t, bin, "/csv", csvPath, "/append", inf)
+	data2, _ := os.ReadFile(csvPath)
+
+	if len(data2) <= len(data1) {
+		t.Errorf("Appended CSV should be longer than original: %d <= %d", len(data2), len(data1))
+	}
+	// Appended file should have header only once (at the start)
+	content := string(data2)
+	headerCount := strings.Count(content, "Filename,Level,Code,Line,Message")
+	if headerCount != 1 {
+		t.Errorf("Appended CSV should have exactly 1 header, got %d", headerCount)
+	}
+}
+
+// TestCLI_LevelSort: /levelsort → errors sorted by level
+func TestCLI_LevelSort(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+
+	out, _ := runBinary(t, bin, "/levelsort", inf)
+	// Should still report the error
+	if !strings.Contains(out, "1284") {
+		t.Errorf("Output should contain error 1284:\n%s", out)
+	}
+}
+
+// TestCLI_Recurse: /recurse → finds INFs in subdirectories
+func TestCLI_Recurse(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	os.MkdirAll(subdir, 0755)
+	writeUTF8File(t, subdir, "nested.inf", validINF)
+
+	out, code := runBinary(t, bin, "/recurse", filepath.Join(dir, "*.inf"))
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "Checked 1 INF(s)") {
+		t.Errorf("Recurse should find nested INF:\n%s", out)
+	}
+}
+
+// TestCLI_Exclude: /exclude → skips excluded files
+func TestCLI_Exclude(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf1 := writeUTF8File(t, dir, "valid.inf", validINF)
+	inf2 := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+	excludeFile := writeUTF8File(t, dir, "exclude.txt", "reserved.inf\n")
+
+	out, code := runBinary(t, bin, "/exclude", excludeFile, inf1, inf2)
+	// With reserved.inf excluded, only valid.inf should be checked → exit 0
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 (reserved.inf excluded)\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "Checked 1 INF(s)") {
+		t.Errorf("Output should show only 1 INF checked (excluded 1):\n%s", out)
+	}
+}
+
+// TestCLI_ErrorLevel: /errorlevel → filters by level
+func TestCLI_ErrorLevel(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+
+	// errorlevel 1 → only show errors (not warnings/info)
+	out, _ := runBinary(t, bin, "/errorlevel", "1", inf)
+	if !strings.Contains(out, "ERROR(1284)") {
+		t.Errorf("Output should still contain ERROR(1284) with /errorlevel 1:\n%s", out)
+	}
+}
+
+// TestCLI_ErrorList: /errorlist → suppresses listed errors (except 1310-1319)
+func TestCLI_ErrorList(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "reserved.inf", reservedClassINF)
+	errorList := writeUTF8File(t, dir, "errorlist.csv", "1284\n")
+
+	out, code := runBinary(t, bin, "/errorlist", errorList, inf)
+	// Error 1284 should be suppressed → INF becomes valid
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0 (error 1284 suppressed)\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "INF is VALID") {
+		t.Errorf("Output should show 'INF is VALID' with 1284 suppressed:\n%s", out)
+	}
+}
+
+// TestCLI_ShowExceptionsContent: /showexceptions → contains file and registry entries
+func TestCLI_ShowExceptionsContent(t *testing.T) {
+	bin := buildBinary(t)
+	out, code := runBinary(t, bin, "/showexceptions")
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0", code)
+	}
+
+	expected := []string{
+		"Release,Source,Type,Path",
+		"Static,File,",
+		"Static,Registry,",
+		"HKCR",
+		"HKLM",
+	}
+	for _, s := range expected {
+		if !strings.Contains(out, s) {
+			t.Errorf("Output missing %q:\n%s", s, out)
+		}
+	}
+}
+
+// TestCLI_HDCRulesContent: /hdcrules → contains both categories
+func TestCLI_HDCRulesContent(t *testing.T) {
+	bin := buildBinary(t)
+	out, code := runBinary(t, bin, "/hdcrules")
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0", code)
+	}
+
+	expected := []string{
+		"HDC Error Code Rules",
+		"All Submissions",
+		"Downlevel Declarative",
+		"(1284)", // Reserved class in All Submissions
+		"(1280)", // Class name/GUID mismatch in All Submissions
+	}
+	for _, s := range expected {
+		if !strings.Contains(out, s) {
+			t.Errorf("Output missing %q:\n%s", s, out)
+		}
+	}
+}
+
+// TestCLI_DashPrefix: flags with dash prefix work the same as slash
+func TestCLI_DashPrefix(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	inf := writeUTF8File(t, dir, "test.inf", validINF)
+
+	out, code := runBinary(t, bin, "-v", "-u", inf)
+	if code != 0 {
+		t.Errorf("Exit code = %d, want 0\nOutput: %s", code, out)
+	}
+	if !strings.Contains(out, "Running in Verbose") {
+		t.Errorf("Dash prefix should work like slash:\n%s", out)
+	}
+}
+
+// TestCLI_NonInfExtension: non-.inf file is skipped
+func TestCLI_NonInfExtension(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	txtFile := writeUTF8File(t, dir, "test.txt", validINF)
+
+	out, _ := runBinary(t, bin, txtFile)
+	if !strings.Contains(out, "does not have .inf extension") {
+		t.Errorf("Output should mention wrong extension:\n%s", out)
+	}
+}
+
+// TestCLI_MissingFile: non-existent INF file → error
+func TestCLI_MissingFile(t *testing.T) {
+	bin := buildBinary(t)
+
+	_, code := runBinary(t, bin, "nonexistent.inf")
+	if code == 0 {
+		t.Error("Exit code = 0, want non-zero for missing file")
+	}
+}
